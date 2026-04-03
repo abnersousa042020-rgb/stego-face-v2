@@ -140,7 +140,7 @@ def optimize_perturbation(frame_bgr, face_box, target_similarity=0.3,
             best_sim = sim_val
             best_delta = delta.clone().detach()
 
-        if (i + 1) % 200 == 0:
+        if (i + 1) % 50 == 0:
             print(f"    Step {i+1}/{iterations}: similarity={sim_val:.4f} (target<{target_similarity}) best={best_sim:.4f}")
 
         # Early stop if target reached
@@ -181,9 +181,9 @@ def handler(job):
     video_url = input_data.get("video_url")
     video_b64 = input_data.get("video_b64")
     mode = input_data.get("mode", "deidentify")  # 'deidentify' = make face unrecognizable
-    epsilon = input_data.get("epsilon", 0.12)
-    iterations = input_data.get("iterations", 500)
-    target_similarity = input_data.get("target_similarity", 0.35)
+    epsilon = input_data.get("epsilon", 0.15)
+    iterations = input_data.get("iterations", 200)
+    target_similarity = input_data.get("target_similarity", 0.40)
 
     if not video_url and not video_b64:
         return {"error": "Missing video_url or video_b64"}
@@ -209,7 +209,7 @@ def handler(job):
 
     # Phase 1: Detect faces in key frames
     print("[PHASE 1] Detecting faces...")
-    key_frame_interval = max(1, int(fps))  # 1 per second
+    key_frame_interval = max(1, int(fps * 2))  # 1 per 2 seconds (faster detection)
     key_frames = {}
     face_boxes = {}
 
@@ -244,7 +244,7 @@ def handler(job):
 
     # Pick ~3-5 key frames evenly spaced for optimization
     key_indices = sorted(key_frames.keys())
-    num_opt_frames = min(3, len(key_indices))
+    num_opt_frames = min(2, len(key_indices))
     opt_step = max(1, len(key_indices) // num_opt_frames)
     opt_indices = key_indices[::opt_step][:num_opt_frames]
 
