@@ -209,6 +209,22 @@ def handler(job):
 
     print(f"[START] mode={mode} eps={epsilon} iters={iterations} target_sim={target_similarity}")
 
+    try:
+        return _process_video(video_path, epsilon, iterations, target_similarity, mode)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[FATAL] {e}\n{tb}")
+        return {"error": str(e), "traceback": tb[:1000], "phase": "handler"}
+    finally:
+        try: os.unlink(video_path)
+        except: pass
+
+
+def _process_video(video_path, epsilon, iterations, target_similarity, mode):
+    import time as _time
+    _job_start = _time.time()
+
     # Open video
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -391,7 +407,7 @@ def handler(job):
     result_b64 = base64.b64encode(result_bytes).decode()
 
     # Cleanup
-    for p in [video_path, temp_video, output_path]:
+    for p in [temp_video, output_path]:
         try: os.unlink(p)
         except: pass
 
