@@ -181,9 +181,9 @@ def handler(job):
     video_url = input_data.get("video_url")
     video_b64 = input_data.get("video_b64")
     mode = input_data.get("mode", "deidentify")  # 'deidentify' = make face unrecognizable
-    epsilon = input_data.get("epsilon", 0.08)
-    iterations = input_data.get("iterations", 1000)
-    target_similarity = input_data.get("target_similarity", 0.3)
+    epsilon = input_data.get("epsilon", 0.12)
+    iterations = input_data.get("iterations", 500)
+    target_similarity = input_data.get("target_similarity", 0.35)
 
     if not video_url and not video_b64:
         return {"error": "Missing video_url or video_b64"}
@@ -244,7 +244,7 @@ def handler(job):
 
     # Pick ~3-5 key frames evenly spaced for optimization
     key_indices = sorted(key_frames.keys())
-    num_opt_frames = min(5, len(key_indices))
+    num_opt_frames = min(3, len(key_indices))
     opt_step = max(1, len(key_indices) // num_opt_frames)
     opt_indices = key_indices[::opt_step][:num_opt_frames]
 
