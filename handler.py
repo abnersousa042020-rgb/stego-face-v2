@@ -44,6 +44,7 @@ def handler(job):
         video_b64 = input_data.get("video_b64")
         epsilon = input_data.get("epsilon", 0.15)
         iterations = input_data.get("iterations", 100)
+        target_similarity = input_data.get("target_similarity", 0.45)
 
         if not video_b64:
             return {"error": "Missing video_b64"}
