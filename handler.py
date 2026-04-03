@@ -32,6 +32,14 @@ MTCNN_MODEL = MTCNN(
 FACENET = InceptionResnetV1(pretrained='vggface2').eval().to(DEVICE)
 for p in FACENET.parameters():
     p.requires_grad = False
+
+# Warmup: first PyTorch inference triggers JIT compilation (slow).
+# Do it now so real jobs don't pay the cost.
+print("[INIT] Warming up GPU (JIT compile)...")
+with torch.no_grad():
+    dummy = torch.randn(1, 3, 160, 160).to(DEVICE)
+    _ = FACENET(dummy)
+    del dummy
 print("[INIT] Ready.")
 
 
@@ -182,8 +190,10 @@ def handler(job):
     video_b64 = input_data.get("video_b64")
     mode = input_data.get("mode", "deidentify")  # 'deidentify' = make face unrecognizable
     epsilon = input_data.get("epsilon", 0.15)
-    iterations = input_data.get("iterations", 200)
-    target_similarity = input_data.get("target_similarity", 0.40)
+    iterations = input_data.get("iterations", 100)
+    target_similarity = input_data.get("target_similarity", 0.45)
+    import time as _time
+    _job_start = _time.time()
 
     if not video_url and not video_b64:
         return {"error": "Missing video_url or video_b64"}
@@ -208,7 +218,7 @@ def handler(job):
     print(f"[INFO] Video: {w}x{h} @ {fps}fps, {total_frames} frames ({total_frames/fps:.1f}s)")
 
     # Phase 1: Detect faces in key frames
-    print("[PHASE 1] Detecting faces...")
+    print(f"[PHASE 1] Detecting faces... ({_time.time()-_job_start:.1f}s)")
     key_frame_interval = max(1, int(fps * 2))  # 1 per 2 seconds (faster detection)
     key_frames = {}
     face_boxes = {}
@@ -240,7 +250,7 @@ def handler(job):
         return {"error": "No faces detected in video"}
 
     # Phase 2: Optimize perturbation on key frames
-    print("[PHASE 2] Optimizing adversarial perturbation on key frames...")
+    print(f"[PHASE 2] Optimizing adversarial perturbation... ({_time.time()-_job_start:.1f}s)")
 
     # Pick ~3-5 key frames evenly spaced for optimization
     key_indices = sorted(key_frames.keys())
@@ -269,8 +279,8 @@ def handler(job):
     avg_sim = np.mean(similarities)
     print(f"\n[INFO] Average similarity after attack: {avg_sim:.4f}")
 
-    # Phase 3: Apply perturbation to all frames (interpolate between key frames)
-    print("[PHASE 3] Applying perturbation to all frames...")
+    # Phase 3: Apply perturbation to all frames
+    print(f"[PHASE 3] Applying perturbation to all frames... ({_time.time()-_job_start:.1f}s)")
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
@@ -309,7 +319,7 @@ def handler(job):
     out.release()
 
     # Phase 4: Re-encode with proper codec + original audio
-    print("[PHASE 4] Re-encoding with H.264 + original audio...")
+    print(f"[PHASE 4] Re-encoding... ({_time.time()-_job_start:.1f}s)")
     output_path = video_path + '_final.mp4'
 
     # Check if original has audio
@@ -343,7 +353,7 @@ def handler(job):
         subprocess.run(['ffmpeg', '-y', '-i', temp_video, '-c:v', 'libx264', '-crf', '18', '-an', output_path], capture_output=True)
 
     # Phase 5: Verify — check similarity after full pipeline
-    print("[PHASE 5] Verifying...")
+    print(f"[PHASE 5] Verifying... ({_time.time()-_job_start:.1f}s)")
     cap_verify = cv2.VideoCapture(output_path)
     cap_orig = cv2.VideoCapture(video_path)
 
