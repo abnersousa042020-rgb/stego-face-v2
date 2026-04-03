@@ -4,6 +4,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libgl1-m
 
 RUN pip install --no-cache-dir runpod facenet-pytorch opencv-python-headless Pillow
 
+# Pre-download FaceNet + MTCNN models into image (avoids 107MB download on cold start)
+RUN python -c "from facenet_pytorch import MTCNN, InceptionResnetV1; InceptionResnetV1(pretrained='vggface2'); MTCNN(); print('Models cached')"
+
 WORKDIR /app
 COPY handler.py .
 
