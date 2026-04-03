@@ -91,7 +91,7 @@ def handler(job):
         optimizer = torch.optim.Adam([delta], lr=0.01)
 
         best_sim = 1.0
-        best_delta = None
+        best_delta = torch.zeros_like(face_input)
 
         for i in range(iterations):
             optimizer.zero_grad()
