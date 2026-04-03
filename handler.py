@@ -312,15 +312,35 @@ def handler(job):
     print("[PHASE 4] Re-encoding with H.264 + original audio...")
     output_path = video_path + '_final.mp4'
 
-    subprocess.run([
-        'ffmpeg', '-y',
-        '-i', temp_video,
-        '-i', video_path,
-        '-c:v', 'libx264', '-crf', '18', '-preset', 'medium', '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac', '-b:a', '192k',
-        '-map', '0:v:0', '-map', '1:a:0', '-shortest',
-        output_path
-    ], capture_output=True)
+    # Check if original has audio
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'quiet', '-select_streams', 'a', '-show_entries', 'stream=codec_type', video_path],
+        capture_output=True, text=True
+    )
+    has_audio = 'audio' in probe.stdout
+
+    if has_audio:
+        result = subprocess.run([
+            'ffmpeg', '-y',
+            '-i', temp_video,
+            '-i', video_path,
+            '-c:v', 'libx264', '-crf', '18', '-preset', 'medium', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '192k',
+            '-map', '0:v:0', '-map', '1:a:0', '-shortest',
+            output_path
+        ], capture_output=True, text=True)
+    else:
+        result = subprocess.run([
+            'ffmpeg', '-y',
+            '-i', temp_video,
+            '-c:v', 'libx264', '-crf', '18', '-preset', 'medium', '-pix_fmt', 'yuv420p',
+            '-an', output_path
+        ], capture_output=True, text=True)
+
+    if not os.path.exists(output_path):
+        print(f"[ERROR] FFmpeg failed: {result.stderr[:500]}")
+        # Fallback: just copy temp video
+        subprocess.run(['ffmpeg', '-y', '-i', temp_video, '-c:v', 'libx264', '-crf', '18', '-an', output_path], capture_output=True)
 
     # Phase 5: Verify — check similarity after full pipeline
     print("[PHASE 5] Verifying...")
