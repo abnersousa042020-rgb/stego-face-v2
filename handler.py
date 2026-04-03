@@ -206,7 +206,7 @@ def handler(job):
             "video_b64": result_b64,
             "avg_similarity_before": 1.0,
             "avg_similarity_after": round(best_sim, 4),
-            "success": best_sim < 0.45,
+            "success": bool(best_sim < 0.45),
             "epsilon": epsilon,
             "iterations": iterations,
             "frames_processed": total_frames,
