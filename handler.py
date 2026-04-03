@@ -86,30 +86,46 @@ def handler(job):
             orig_emb = F.normalize(orig_emb, dim=0)
 
         print(f"[{time.time()-t0:.1f}s] Running {iterations} optimization steps...")
-        face_input = face_tensor.unsqueeze(0).to(DEVICE).clone().detach()
-        delta = torch.zeros_like(face_input, requires_grad=True, device=DEVICE)
-        optimizer = torch.optim.Adam([delta], lr=0.01)
+        face_input = face_tensor.unsqueeze(0).to(DEVICE).clone().detach().requires_grad_(False)
+        # Perturbation as a Parameter so Adam tracks it properly
+        delta = torch.nn.Parameter(torch.zeros_like(face_input))
+        optimizer = torch.optim.Adam([delta], lr=0.05)  # Higher LR for faster convergence
 
         best_sim = 1.0
         best_delta = torch.zeros_like(face_input)
 
         for i in range(iterations):
             optimizer.zero_grad()
-            adv_face = torch.clamp(face_input + delta, -1, 1)
+            adv_face = face_input + delta
+            adv_face = torch.clamp(adv_face, -1, 1)
+
+            # Forward through FaceNet
             adv_emb = FACENET(adv_face).squeeze()
             adv_emb_norm = F.normalize(adv_emb, dim=0)
-            similarity = torch.dot(orig_emb, adv_emb_norm)
-            loss = similarity + 0.05 * delta.norm()
+            similarity = torch.dot(orig_emb.detach(), adv_emb_norm)
+
+            # Loss: minimize similarity (no L2 penalty — let epsilon clamp handle magnitude)
+            loss = similarity
             loss.backward()
+
+            # Check gradients on first iter
+            if i == 0:
+                grad_mag = delta.grad.abs().mean().item() if delta.grad is not None else 0
+                print(f"  Grad magnitude: {grad_mag:.6f} ({'OK' if grad_mag > 0 else 'ZERO - no gradient flow!'})")
+
             optimizer.step()
             with torch.no_grad():
-                delta.clamp_(-epsilon, epsilon)
+                delta.data.clamp_(-epsilon, epsilon)
+
             sim_val = similarity.item()
             if sim_val < best_sim:
                 best_sim = sim_val
-                best_delta = delta.clone().detach()
+                best_delta = delta.data.clone()
             if (i+1) % 25 == 0:
                 print(f"  Step {i+1}: sim={sim_val:.4f} best={best_sim:.4f}")
+            if best_sim < target_similarity:
+                print(f"  Target reached at step {i+1}! sim={best_sim:.4f}")
+                break
 
         print(f"[{time.time()-t0:.1f}s] Optimization done. Best sim: {best_sim:.4f}")
 
