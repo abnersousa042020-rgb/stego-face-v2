@@ -25,8 +25,9 @@ from PIL import Image
 
 MTCNN_MODEL = MTCNN(image_size=160, margin=20, device=DEVICE, post_process=True, keep_all=False)
 FACENET = InceptionResnetV1(pretrained='vggface2').eval().to(DEVICE)
-for p in FACENET.parameters():
-    p.requires_grad = False
+# NOTE: Keep requires_grad=True on params! With frozen params, GPU float32
+# rounds the tiny initial gradient (~1e-10) to exactly 0, killing optimization.
+# Params won't be updated (we only optimize delta), but the computation graph needs them.
 
 # Warmup
 print("[INIT] Warming up...")
