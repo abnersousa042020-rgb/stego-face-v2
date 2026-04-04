@@ -100,12 +100,14 @@ def handler(job):
             adv_face = face_input + delta
             adv_face = torch.clamp(adv_face, -1, 1)
 
-            # Forward through FaceNet
-            adv_emb = FACENET(adv_face).squeeze()
+            # Forward through FaceNet with gradients enabled
+            # (eval mode + frozen params can block autograd — torch.enable_grad forces it)
+            with torch.enable_grad():
+                adv_emb = FACENET(adv_face).squeeze()
             adv_emb_norm = F.normalize(adv_emb, dim=0)
             similarity = torch.dot(orig_emb.detach(), adv_emb_norm)
 
-            # Loss: minimize similarity (no L2 penalty — let epsilon clamp handle magnitude)
+            # Loss: minimize similarity
             loss = similarity
             loss.backward()
 

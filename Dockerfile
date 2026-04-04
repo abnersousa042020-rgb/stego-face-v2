@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir runpod facenet-pytorch opencv-python-headless Pil
 RUN python -c "from facenet_pytorch import MTCNN, InceptionResnetV1; InceptionResnetV1(pretrained='vggface2'); MTCNN(); print('Models cached')"
 
 WORKDIR /app
-ARG CACHE_BUST=3
 COPY handler.py .
+RUN echo "build_v4"
 
 CMD ["python", "-u", "handler.py"]
