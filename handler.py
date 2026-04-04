@@ -90,7 +90,9 @@ def handler(job):
         print(f"[{time.time()-t0:.1f}s] Running {iterations} optimization steps...")
         face_input = face_tensor.unsqueeze(0).to(DEVICE).clone().detach().requires_grad_(False)
         # Perturbation as a Parameter so Adam tracks it properly
-        delta = torch.nn.Parameter(torch.zeros_like(face_input))
+        # Initialize with small random noise — NOT zeros. At delta=0 the gradient
+        # is ~1e-10 which GPU float32 rounds to 0. Small noise gives a real gradient.
+        delta = torch.nn.Parameter(torch.randn_like(face_input) * 0.01)
         optimizer = torch.optim.Adam([delta], lr=0.05)  # Higher LR for faster convergence
 
         best_sim = 1.0
