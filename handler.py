@@ -1,6 +1,6 @@
 """
-StegoAudio — Adversarial Face Worker v2
-Per-frame optimization: each frame gets its own perturbation.
+StegoAudio — Adversarial Face Worker v3
+Pixel-space optimization: perturbation applied directly to frame pixels.
 """
 
 import runpod
@@ -26,53 +26,50 @@ from PIL import Image
 MTCNN_MODEL = MTCNN(image_size=160, margin=20, device=DEVICE, post_process=True, keep_all=False)
 FACENET = InceptionResnetV1(pretrained='vggface2').eval().to(DEVICE)
 
-# Warmup
 print("[INIT] Warming up...")
 with torch.no_grad():
     _ = FACENET(torch.randn(1, 3, 160, 160).to(DEVICE))
 print("[INIT] Ready.")
 
 
-def optimize_face(frame_bgr, epsilon, iterations, target_similarity):
-    """Optimize perturbation for a single frame. Returns noise_bgr (float32) and similarity."""
+def optimize_frame_pixel(frame_bgr, orig_emb, epsilon, iterations, target_similarity):
+    """
+    Optimize perturbation in PIXEL SPACE (not aligned space).
+    This survives H.264 re-encoding because the perturbation maps 1:1 to pixels.
+    """
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    pil_img = Image.fromarray(rgb)
-
-    # Detect face
-    face_tensor = MTCNN_MODEL(pil_img)
-    if face_tensor is None:
-        return None, None, 1.0
-
-    boxes, _ = MTCNN_MODEL.detect(pil_img)
+    pil = Image.fromarray(rgb)
+    boxes, _ = MTCNN_MODEL.detect(pil)
     if boxes is None or len(boxes) == 0:
         return None, None, 1.0
 
     box = boxes[0].astype(int)
-    x1, y1, x2, y2 = box
-    margin = 30
     h, w = frame_bgr.shape[:2]
-    x1, y1 = max(0, x1 - margin), max(0, y1 - margin)
-    x2, y2 = min(w, x2 + margin), min(h, y2 + margin)
+    x1 = max(0, box[0] - 20)
+    y1 = max(0, box[1] - 20)
+    x2 = min(w, box[2] + 20)
+    y2 = min(h, box[3] + 20)
+    rh, rw = y2 - y1, x2 - x1
 
-    # Original embedding
-    with torch.no_grad():
-        orig_emb = FACENET(face_tensor.unsqueeze(0).to(DEVICE)).squeeze()
-        orig_emb = F.normalize(orig_emb, dim=0)
+    # Crop face from frame, resize to 160x160, convert to tensor
+    face_crop = frame_bgr[y1:y2, x1:x2].copy()
+    crop_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+    crop_160 = cv2.resize(crop_rgb, (160, 160)).astype(np.float32) / 127.5 - 1.0
+    crop_tensor = torch.from_numpy(crop_160).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
 
-    # Optimize
-    face_input = face_tensor.unsqueeze(0).to(DEVICE).clone().detach()
-    delta = torch.nn.Parameter(torch.randn_like(face_input) * 0.01)
+    # Optimize perturbation on the raw crop (pixel space)
+    delta = torch.nn.Parameter(torch.randn_like(crop_tensor) * 0.01)
     optimizer = torch.optim.Adam([delta], lr=0.05)
 
     best_sim = 1.0
-    best_delta = torch.zeros_like(face_input)
+    best_delta = torch.zeros_like(delta)
 
     for i in range(iterations):
         optimizer.zero_grad()
-        adv_face = torch.clamp(face_input + delta, -1, 1)
+        adv = torch.clamp(crop_tensor + delta, -1, 1)
         with torch.enable_grad():
-            adv_emb = FACENET(adv_face).squeeze()
-        sim = torch.dot(orig_emb.detach(), F.normalize(adv_emb, dim=0))
+            emb = FACENET(adv).squeeze()
+        sim = torch.dot(orig_emb.detach(), F.normalize(emb, dim=0))
         sim.backward()
         optimizer.step()
         with torch.no_grad():
@@ -84,22 +81,17 @@ def optimize_face(frame_bgr, epsilon, iterations, target_similarity):
         if best_sim < target_similarity:
             break
 
-    # Convert to pixel-space noise
+    # Convert delta to pixel-space noise for the face region
     with torch.no_grad():
-        adv_aligned = torch.clamp(face_input + best_delta, -1, 1)
-        orig_np = ((face_input.squeeze().permute(1, 2, 0).cpu().numpy() + 1) * 127.5)
-        adv_np = ((adv_aligned.squeeze().permute(1, 2, 0).cpu().numpy() + 1) * 127.5)
-        diff = adv_np - orig_np
-        rh, rw = y2 - y1, x2 - x1
-        noise = cv2.resize(diff, (rw, rh), interpolation=cv2.INTER_LINEAR)
-        noise = noise[:, :, ::-1].copy()  # RGB to BGR
+        delta_np = best_delta.squeeze().permute(1, 2, 0).cpu().numpy() * 127.5
+        delta_full = cv2.resize(delta_np, (rw, rh))
+        delta_bgr = delta_full[:, :, ::-1].copy()
         # Soft elliptical mask
         yy, xx = np.mgrid[0:rh, 0:rw].astype(np.float64)
-        cx, cy = rw / 2, rh / 2
-        mask = np.exp(-((xx - cx) ** 2 / (cx * 0.85) ** 2 + (yy - cy) ** 2 / (cy * 0.85) ** 2))
-        noise = (noise * mask[:, :, np.newaxis]).astype(np.float32)
+        mask = np.exp(-((xx - rw/2)**2 / (rw*0.42)**2 + (yy - rh/2)**2 / (rh*0.42)**2))
+        delta_bgr = (delta_bgr * mask[:, :, np.newaxis]).astype(np.float32)
 
-    return (x1, y1, x2, y2), noise, best_sim
+    return (x1, y1, x2, y2), delta_bgr, best_sim
 
 
 def handler(job):
@@ -108,8 +100,8 @@ def handler(job):
         input_data = job["input"]
         video_b64 = input_data.get("video_b64")
         video_url = input_data.get("video_url")
-        epsilon = input_data.get("epsilon", 0.25)
-        iterations = input_data.get("iterations", 300)
+        epsilon = input_data.get("epsilon", 0.30)
+        iterations = input_data.get("iterations", 200)
         target_similarity = input_data.get("target_similarity", 0.35)
 
         if not video_b64 and not video_url:
@@ -135,35 +127,54 @@ def handler(job):
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         print(f"[{time.time()-t0:.1f}s] Video: {w}x{h} @ {fps:.0f}fps, {total_frames} frames ({total_frames/fps:.1f}s)")
 
-        # Optimize every N frames (1 per second), interpolate between
-        opt_interval = max(1, int(fps))  # 1 per second
-        opt_frames = list(range(0, total_frames, opt_interval))
-        print(f"[{time.time()-t0:.1f}s] Optimizing {len(opt_frames)} key frames...")
+        # Get original embedding from first good frame
+        print(f"[{time.time()-t0:.1f}s] Getting original embedding...")
+        orig_emb = None
+        for fi in range(0, min(total_frames, int(fps * 5)), max(1, int(fps))):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            face = MTCNN_MODEL(Image.fromarray(rgb))
+            if face is not None:
+                with torch.no_grad():
+                    orig_emb = F.normalize(FACENET(face.unsqueeze(0).to(DEVICE)).squeeze(), dim=0)
+                break
 
-        # Read key frames
-        key_data = {}  # frame_idx -> (box, noise, similarity)
+        if orig_emb is None:
+            cap.release()
+            os.unlink(video_path)
+            return {"error": "No face detected for embedding"}
+
+        # Optimize every second
+        opt_interval = max(1, int(fps))
+        opt_frames = list(range(0, total_frames, opt_interval))
+        print(f"[{time.time()-t0:.1f}s] Optimizing {len(opt_frames)} key frames (pixel-space)...")
+
+        key_data = {}
         for idx in opt_frames:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ret, frame = cap.read()
             if not ret:
                 continue
-            box, noise, sim = optimize_face(frame, epsilon, iterations, target_similarity)
+            box, noise, sim = optimize_frame_pixel(frame, orig_emb, epsilon, iterations, target_similarity)
             if box is not None:
                 key_data[idx] = (box, noise, sim)
-                if len(key_data) % 5 == 0:
-                    print(f"  [{time.time()-t0:.1f}s] Optimized {len(key_data)}/{len(opt_frames)} frames, last sim={sim:.4f}")
+            if len(key_data) % 5 == 0 and len(key_data) > 0:
+                print(f"  [{time.time()-t0:.1f}s] {len(key_data)}/{len(opt_frames)} frames, last sim={sim:.4f}")
 
         if not key_data:
             cap.release()
             os.unlink(video_path)
-            return {"error": "No faces detected"}
+            return {"error": "No faces optimized"}
 
         sims = [v[2] for v in key_data.values()]
-        avg_sim = np.mean(sims)
-        print(f"[{time.time()-t0:.1f}s] Done. Avg similarity: {avg_sim:.4f} ({len(key_data)} frames)")
+        avg_sim = float(np.mean(sims))
+        print(f"[{time.time()-t0:.1f}s] Optimization done. Avg sim: {avg_sim:.4f}")
 
-        # Apply perturbation to ALL frames
-        print(f"[{time.time()-t0:.1f}s] Applying to all {total_frames} frames...")
+        # Apply to all frames
+        print(f"[{time.time()-t0:.1f}s] Applying to all frames...")
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         fourcc = cv2.VideoWriter.fourcc(*'mp4v')
         temp_out = video_path + '_out.mp4'
@@ -174,28 +185,21 @@ def handler(job):
             ret, frame = cap.read()
             if not ret:
                 break
-
-            # Find nearest optimized frame
             nearest = min(opt_indices, key=lambda k: abs(k - fi))
             box, noise, _ = key_data[nearest]
-            x1, y1, x2, y2 = box
-
-            # Resize noise if needed
-            rh, rw = y2 - y1, x2 - x1
-            if noise.shape[0] != rh or noise.shape[1] != rw:
-                noise_r = cv2.resize(noise, (rw, rh), interpolation=cv2.INTER_LINEAR)
-            else:
-                noise_r = noise
-
-            # Apply
-            region = frame[y1:y2, x1:x2].astype(np.float32) + noise_r
-            frame[y1:y2, x1:x2] = np.clip(region, 0, 255).astype(np.uint8)
+            bx1, by1, bx2, by2 = box
+            rh, rw = by2 - by1, bx2 - bx1
+            n = noise
+            if n.shape[0] != rh or n.shape[1] != rw:
+                n = cv2.resize(n, (rw, rh))
+            region = frame[by1:by2, bx1:bx2].astype(np.float32) + n
+            frame[by1:by2, bx1:bx2] = np.clip(region, 0, 255).astype(np.uint8)
             writer.write(frame)
 
         cap.release()
         writer.release()
 
-        # Re-encode with H.264 + original audio
+        # Re-encode
         print(f"[{time.time()-t0:.1f}s] Re-encoding...")
         final_out = video_path + '_final.mp4'
         probe = subprocess.run(['ffprobe', '-v', 'quiet', '-select_streams', 'a', '-show_entries', 'stream=codec_type', video_path], capture_output=True, text=True)
@@ -209,7 +213,6 @@ def handler(job):
         if not os.path.exists(final_out):
             subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-an', final_out], capture_output=True)
 
-        print(f"[{time.time()-t0:.1f}s] Reading output...")
         with open(final_out, 'rb') as f:
             result_b64 = base64.b64encode(f.read()).decode()
 
@@ -218,12 +221,12 @@ def handler(job):
             except: pass
 
         elapsed = time.time() - t0
-        print(f"[{elapsed:.1f}s] DONE! Avg similarity: {avg_sim:.4f}, {len(key_data)} key frames")
+        print(f"[{elapsed:.1f}s] DONE! Avg sim: {avg_sim:.4f}, {len(key_data)} key frames")
 
         return {
             "video_b64": result_b64,
             "avg_similarity_before": 1.0,
-            "avg_similarity_after": round(float(avg_sim), 4),
+            "avg_similarity_after": round(avg_sim, 4),
             "success": bool(avg_sim < target_similarity + 0.1),
             "epsilon": epsilon,
             "iterations": iterations,
