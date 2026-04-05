@@ -100,8 +100,8 @@ def handler(job):
         input_data = job["input"]
         video_b64 = input_data.get("video_b64")
         video_url = input_data.get("video_url")
-        epsilon = input_data.get("epsilon", 0.30)
-        iterations = input_data.get("iterations", 200)
+        epsilon = input_data.get("epsilon", 0.50)
+        iterations = input_data.get("iterations", 300)
         target_similarity = input_data.get("target_similarity", 0.35)
 
         if not video_b64 and not video_url:
@@ -173,27 +173,41 @@ def handler(job):
         avg_sim = float(np.mean(sims))
         print(f"[{time.time()-t0:.1f}s] Optimization done. Avg sim: {avg_sim:.4f}")
 
-        # Apply to all frames
-        print(f"[{time.time()-t0:.1f}s] Applying to all frames...")
+        # Apply to all frames — detect face in EVERY frame for correct positioning
+        print(f"[{time.time()-t0:.1f}s] Applying to all frames (per-frame detection)...")
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         fourcc = cv2.VideoWriter.fourcc(*'mp4v')
         temp_out = video_path + '_out.mp4'
         writer = cv2.VideoWriter(temp_out, fourcc, fps, (w, h))
 
         opt_indices = sorted(key_data.keys())
+        last_box = None
         for fi in range(total_frames):
             ret, frame = cap.read()
             if not ret:
                 break
-            nearest = min(opt_indices, key=lambda k: abs(k - fi))
-            box, noise, _ = key_data[nearest]
-            bx1, by1, bx2, by2 = box
-            rh, rw = by2 - by1, bx2 - bx1
-            n = noise
-            if n.shape[0] != rh or n.shape[1] != rw:
-                n = cv2.resize(n, (rw, rh))
-            region = frame[by1:by2, bx1:bx2].astype(np.float32) + n
-            frame[by1:by2, bx1:bx2] = np.clip(region, 0, 255).astype(np.uint8)
+
+            # Detect face in THIS frame for correct box position
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            det_boxes, _ = MTCNN_MODEL.detect(Image.fromarray(rgb))
+            if det_boxes is not None and len(det_boxes) > 0:
+                db = det_boxes[0].astype(int)
+                cur_box = (max(0,db[0]-20), max(0,db[1]-20), min(w,db[2]+20), min(h,db[3]+20))
+                last_box = cur_box
+            else:
+                cur_box = last_box
+
+            if cur_box is not None:
+                # Get noise from nearest key frame
+                nearest = min(opt_indices, key=lambda k: abs(k - fi))
+                _, noise, _ = key_data[nearest]
+                bx1, by1, bx2, by2 = cur_box
+                rh, rw = by2 - by1, bx2 - bx1
+                # Resize noise to current face box size
+                n = cv2.resize(noise, (rw, rh)) if noise.shape[0] != rh or noise.shape[1] != rw else noise
+                region = frame[by1:by2, bx1:bx2].astype(np.float32) + n
+                frame[by1:by2, bx1:bx2] = np.clip(region, 0, 255).astype(np.uint8)
+
             writer.write(frame)
 
         cap.release()
@@ -206,12 +220,12 @@ def handler(job):
         has_audio = 'audio' in probe.stdout
 
         if has_audio:
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-i', video_path, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-map', '0:v:0', '-map', '1:a:0', '-shortest', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-i', video_path, '-c:v', 'libx264', '-crf', '12', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-map', '0:v:0', '-map', '1:a:0', '-shortest', final_out], capture_output=True)
         else:
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-an', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '12', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-an', final_out], capture_output=True)
 
         if not os.path.exists(final_out):
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-an', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '12', '-an', final_out], capture_output=True)
 
         with open(final_out, 'rb') as f:
             result_b64 = base64.b64encode(f.read()).decode()
