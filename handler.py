@@ -114,17 +114,29 @@ def handler(job):
                 y2 = min(h, box[3] + 20)
                 rh, rw = y2 - y1, x2 - x1
 
-                # Optimize THIS frame at full resolution
-                crop = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2RGB).astype(np.float32) / 127.5 - 1.0
+                # Optimize THIS frame at full resolution with texture-aware masking
+                crop_bgr = frame[y1:y2, x1:x2].copy()
+                crop = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 127.5 - 1.0
                 crop_t = torch.from_numpy(crop).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
+
+                # Texture mask: high on edges/hair/eyebrows, low on smooth skin
+                gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+                sy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+                edges = np.sqrt(sx**2 + sy**2)
+                edges = edges / (edges.max() + 1e-6)
+                edges = cv2.GaussianBlur(edges, (15, 15), 5)
+                tex_np = 0.3 + 0.7 * np.clip(edges * 3, 0, 1)
+                tex_mask = torch.from_numpy(np.stack([tex_np]*3, axis=-1)).permute(2,0,1).unsqueeze(0).float().to(DEVICE)
 
                 delta = torch.nn.Parameter(torch.randn_like(crop_t) * 0.01)
                 opt = torch.optim.Adam([delta], lr=0.05)
 
                 for i in range(iterations):
                     opt.zero_grad()
-                    adv = torch.clamp(crop_t + delta, -1, 1)
-                    # Differentiable resize to 160x160 for FaceNet
+                    # Texture mask INSIDE optimization — optimizer compensates
+                    masked_delta = delta * tex_mask
+                    adv = torch.clamp(crop_t + masked_delta, -1, 1)
                     adv_160 = F.interpolate(adv, size=(160, 160), mode='bilinear', align_corners=False)
                     with torch.enable_grad():
                         emb = FACENET(adv_160).squeeze()
@@ -139,10 +151,11 @@ def handler(job):
                 sims.append(sim.item())
 
                 with torch.no_grad():
-                    noise = (delta.squeeze().permute(1, 2, 0).cpu().numpy() * 127.5)[:, :, ::-1].copy().astype(np.float32)
+                    final_delta = (delta * tex_mask).squeeze().permute(1, 2, 0).cpu().numpy() * 127.5
+                    noise = final_delta[:, :, ::-1].copy().astype(np.float32)
                     yy, xx = np.mgrid[0:rh, 0:rw].astype(np.float64)
-                    mask = np.exp(-((xx - rw/2)**2 / (rw*0.42)**2 + (yy - rh/2)**2 / (rh*0.42)**2))
-                    noise *= mask[:, :, np.newaxis]
+                    ellip = np.exp(-((xx - rw/2)**2 / (rw*0.42)**2 + (yy - rh/2)**2 / (rh*0.42)**2))
+                    noise *= ellip[:, :, np.newaxis]
                     last_noise = noise
                     last_box = (x1, y1, x2, y2)
 
