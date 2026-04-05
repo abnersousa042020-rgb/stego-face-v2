@@ -43,19 +43,26 @@ def handler(job):
     try:
         input_data = job["input"]
         video_b64 = input_data.get("video_b64")
+        video_url = input_data.get("video_url")
         epsilon = input_data.get("epsilon", 0.15)
         iterations = input_data.get("iterations", 100)
         target_similarity = input_data.get("target_similarity", 0.45)
 
-        if not video_b64:
-            return {"error": "Missing video_b64"}
+        if not video_b64 and not video_url:
+            return {"error": "Missing video_b64 or video_url"}
 
-        print(f"[{time.time()-t0:.1f}s] Decoding video...")
-        video_bytes = base64.b64decode(video_b64)
-        tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
-        tmp.write(video_bytes)
-        tmp.close()
-        video_path = tmp.name
+        if video_url:
+            print(f"[{time.time()-t0:.1f}s] Downloading video from URL...")
+            tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
+            urllib.request.urlretrieve(video_url, tmp.name)
+            video_path = tmp.name
+        else:
+            print(f"[{time.time()-t0:.1f}s] Decoding video...")
+            video_bytes = base64.b64decode(video_b64)
+            tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
+            tmp.write(video_bytes)
+            tmp.close()
+            video_path = tmp.name
 
         print(f"[{time.time()-t0:.1f}s] Opening video...")
         cap = cv2.VideoCapture(video_path)
