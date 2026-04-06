@@ -16,6 +16,7 @@ import urllib.request
 import cv2
 import time
 import traceback
+import json
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"[INIT] Device: {DEVICE}")
@@ -196,8 +197,43 @@ def handler(job):
         if not os.path.exists(final_out):
             subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-an', final_out], capture_output=True)
 
-        with open(final_out, 'rb') as f:
-            result_b64 = base64.b64encode(f.read()).decode()
+        # Check file size — if large, upload to temp hosting instead of base64
+        file_size = os.path.getsize(final_out)
+        file_size_mb = file_size / 1024 / 1024
+
+        if file_size_mb <= 5:
+            # Small: return as base64
+            with open(final_out, 'rb') as f:
+                result_b64 = base64.b64encode(f.read()).decode()
+            video_url_result = None
+        else:
+            # Large: upload to temp file hosting (file.io — 1 download, auto-deletes)
+            result_b64 = None
+            print(f"[{time.time()-t0:.1f}s] Video too large for base64 ({file_size_mb:.0f}MB), uploading...")
+            try:
+                import http.client
+                import mimetypes
+                boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+                with open(final_out, 'rb') as f:
+                    file_data = f.read()
+                body = (
+                    f'--{boundary}\r\n'
+                    f'Content-Disposition: form-data; name="file"; filename="result.mp4"\r\n'
+                    f'Content-Type: video/mp4\r\n\r\n'
+                ).encode() + file_data + f'\r\n--{boundary}--\r\n'.encode()
+                conn = http.client.HTTPSConnection("file.io")
+                conn.request("POST", "/?expires=1d", body=body, headers={
+                    'Content-Type': f'multipart/form-data; boundary={boundary}',
+                })
+                resp = conn.getresponse()
+                resp_data = json.loads(resp.read().decode())
+                video_url_result = resp_data.get('link')
+                print(f"  Uploaded: {video_url_result}")
+            except Exception as upload_err:
+                print(f"  Upload failed: {upload_err}, falling back to base64")
+                with open(final_out, 'rb') as f:
+                    result_b64 = base64.b64encode(f.read()).decode()
+                video_url_result = None
 
         for p in [video_path, temp_out, final_out]:
             try: os.unlink(p)
@@ -206,8 +242,7 @@ def handler(job):
         elapsed = time.time() - t0
         print(f"[{elapsed:.1f}s] DONE! Avg sim: {avg_sim:.4f}")
 
-        return {
-            "video_b64": result_b64,
+        result = {
             "avg_similarity_before": 1.0,
             "avg_similarity_after": round(avg_sim, 4),
             "success": bool(avg_sim < target_similarity + 0.1),
@@ -216,6 +251,11 @@ def handler(job):
             "frames_processed": total_frames,
             "execution_seconds": round(elapsed, 1),
         }
+        if result_b64:
+            result["video_b64"] = result_b64
+        if video_url_result:
+            result["video_url"] = video_url_result
+        return result
 
     except Exception as e:
         tb = traceback.format_exc()
