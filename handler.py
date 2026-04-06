@@ -190,12 +190,12 @@ def handler(job):
         has_audio = 'audio' in probe.stdout
 
         if has_audio:
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-i', video_path, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-map', '0:v:0', '-map', '1:a:0', '-shortest', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-i', video_path, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-map', '0:v:0', '-map', '1:a:0', '-map_metadata', '-1', '-shortest', final_out], capture_output=True)
         else:
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-an', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-map_metadata', '-1', '-an', final_out], capture_output=True)
 
         if not os.path.exists(final_out):
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-an', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-map_metadata', '-1', '-an', final_out], capture_output=True)
 
         # Check file size — if large, upload to temp hosting instead of base64
         file_size = os.path.getsize(final_out)
