@@ -40,8 +40,8 @@ def handler(job):
         input_data = job["input"]
         video_b64 = input_data.get("video_b64")
         video_url = input_data.get("video_url")
-        epsilon = input_data.get("epsilon", 0.50)
-        iterations = input_data.get("iterations", 50)
+        epsilon = input_data.get("epsilon", 0.70)
+        iterations = input_data.get("iterations", 100)
         target_similarity = input_data.get("target_similarity", 0.35)
 
         if not video_b64 and not video_url:
@@ -127,11 +127,11 @@ def handler(job):
                 edges = np.sqrt(sx**2 + sy**2)
                 edges = edges / (edges.max() + 1e-6)
                 edges = cv2.GaussianBlur(edges, (15, 15), 5)
-                tex_np = 0.3 + 0.7 * np.clip(edges * 3, 0, 1)
+                tex_np = 0.5 + 0.5 * np.clip(edges * 3, 0, 1)
                 tex_mask = torch.from_numpy(np.stack([tex_np]*3, axis=-1)).permute(2,0,1).unsqueeze(0).float().to(DEVICE)
 
                 delta = torch.nn.Parameter(torch.randn_like(crop_t) * 0.01)
-                opt = torch.optim.Adam([delta], lr=0.05)
+                opt = torch.optim.Adam([delta], lr=0.08)
 
                 for i in range(iterations):
                     opt.zero_grad()
