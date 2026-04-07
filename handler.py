@@ -197,43 +197,37 @@ def handler(job):
         if not os.path.exists(final_out):
             subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-map_metadata', '-1', '-an', final_out], capture_output=True)
 
-        # Check file size — if large, upload to temp hosting instead of base64
+        # Upload result: use pre-signed Supabase URL if provided, else base64
         file_size = os.path.getsize(final_out)
         file_size_mb = file_size / 1024 / 1024
+        result_upload_url = input_data.get("result_upload_url")
+        result_b64 = None
+        video_url_result = None
 
-        if file_size_mb <= 5:
-            # Small: return as base64
-            with open(final_out, 'rb') as f:
-                result_b64 = base64.b64encode(f.read()).decode()
-            video_url_result = None
-        else:
-            # Large: upload to temp file hosting (file.io — 1 download, auto-deletes)
-            result_b64 = None
-            print(f"[{time.time()-t0:.1f}s] Video too large for base64 ({file_size_mb:.0f}MB), uploading...")
+        if result_upload_url and file_size_mb > 5:
+            # Upload to Supabase Storage via pre-signed URL
+            print(f"[{time.time()-t0:.1f}s] Uploading result ({file_size_mb:.0f}MB) to Supabase...")
             try:
-                import http.client
-                import mimetypes
-                boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
                 with open(final_out, 'rb') as f:
                     file_data = f.read()
-                body = (
-                    f'--{boundary}\r\n'
-                    f'Content-Disposition: form-data; name="file"; filename="result.mp4"\r\n'
-                    f'Content-Type: video/mp4\r\n\r\n'
-                ).encode() + file_data + f'\r\n--{boundary}--\r\n'.encode()
-                conn = http.client.HTTPSConnection("file.io")
-                conn.request("POST", "/?expires=1d", body=body, headers={
-                    'Content-Type': f'multipart/form-data; boundary={boundary}',
-                })
-                resp = conn.getresponse()
-                resp_data = json.loads(resp.read().decode())
-                video_url_result = resp_data.get('link')
-                print(f"  Uploaded: {video_url_result}")
+                req = urllib.request.Request(
+                    result_upload_url,
+                    data=file_data,
+                    headers={'Content-Type': 'video/mp4'},
+                    method='PUT'
+                )
+                resp = urllib.request.urlopen(req, timeout=300)
+                video_url_result = "supabase"  # marker — app will generate download URL
+                print(f"  Uploaded to Supabase successfully")
             except Exception as upload_err:
-                print(f"  Upload failed: {upload_err}, falling back to base64")
+                print(f"  Supabase upload failed: {upload_err}")
+                # Fall back to base64 (may fail for large files)
                 with open(final_out, 'rb') as f:
                     result_b64 = base64.b64encode(f.read()).decode()
-                video_url_result = None
+        else:
+            # Small file: return as base64
+            with open(final_out, 'rb') as f:
+                result_b64 = base64.b64encode(f.read()).decode()
 
         for p in [video_path, temp_out, final_out]:
             try: os.unlink(p)
