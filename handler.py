@@ -40,8 +40,8 @@ def handler(job):
         input_data = job["input"]
         video_b64 = input_data.get("video_b64")
         video_url = input_data.get("video_url")
-        epsilon = input_data.get("epsilon", 0.70)
-        iterations = input_data.get("iterations", 100)
+        epsilon = input_data.get("epsilon", 0.50)
+        iterations = input_data.get("iterations", 50)
         target_similarity = input_data.get("target_similarity", 0.35)
 
         if not video_b64 and not video_url:
@@ -116,32 +116,34 @@ def handler(job):
                 rh, rw = y2 - y1, x2 - x1
 
                 # Optimize THIS frame at full resolution with texture-aware masking
+                # Use CPU float64 for optimization (GPU float32 loses precision)
                 crop_bgr = frame[y1:y2, x1:x2].copy()
-                crop = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 127.5 - 1.0
-                crop_t = torch.from_numpy(crop).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
+                crop = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float64) / 127.5 - 1.0
+                crop_t = torch.from_numpy(crop).permute(2, 0, 1).unsqueeze(0).float().cpu()
 
-                # Texture mask: high on edges/hair/eyebrows, low on smooth skin
+                # Texture mask
                 gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
                 sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
                 sy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
                 edges = np.sqrt(sx**2 + sy**2)
                 edges = edges / (edges.max() + 1e-6)
                 edges = cv2.GaussianBlur(edges, (15, 15), 5)
-                tex_np = 0.5 + 0.5 * np.clip(edges * 3, 0, 1)
-                tex_mask = torch.from_numpy(np.stack([tex_np]*3, axis=-1)).permute(2,0,1).unsqueeze(0).float().to(DEVICE)
+                tex_np = 0.3 + 0.7 * np.clip(edges * 3, 0, 1)
+                tex_mask = torch.from_numpy(np.stack([tex_np]*3, axis=-1)).permute(2,0,1).unsqueeze(0).float().cpu()
 
+                # Run FaceNet on GPU but optimize delta on CPU for float64 precision
+                facenet_cpu = FACENET.cpu()
                 delta = torch.nn.Parameter(torch.randn_like(crop_t) * 0.01)
-                opt = torch.optim.Adam([delta], lr=0.08)
+                opt = torch.optim.Adam([delta], lr=0.05)
 
+                orig_emb_cpu = orig_emb.cpu()
                 for i in range(iterations):
                     opt.zero_grad()
-                    # Texture mask INSIDE optimization — optimizer compensates
                     masked_delta = delta * tex_mask
                     adv = torch.clamp(crop_t + masked_delta, -1, 1)
                     adv_160 = F.interpolate(adv, size=(160, 160), mode='bilinear', align_corners=False)
-                    with torch.enable_grad():
-                        emb = FACENET(adv_160).squeeze()
-                    sim = torch.dot(orig_emb.detach(), F.normalize(emb, dim=0))
+                    emb = facenet_cpu(adv_160).squeeze()
+                    sim = torch.dot(orig_emb_cpu.detach(), F.normalize(emb, dim=0))
                     sim.backward()
                     opt.step()
                     with torch.no_grad():
@@ -150,6 +152,7 @@ def handler(job):
                         break
 
                 sims.append(sim.item())
+                FACENET.to(DEVICE)  # Move back to GPU for detection
 
                 with torch.no_grad():
                     final_delta = (delta * tex_mask).squeeze().permute(1, 2, 0).cpu().numpy() * 127.5
