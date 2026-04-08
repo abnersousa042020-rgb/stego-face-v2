@@ -41,7 +41,7 @@ def handler(job):
         video_b64 = input_data.get("video_b64")
         video_url = input_data.get("video_url")
         epsilon = input_data.get("epsilon", 0.50)
-        iterations = input_data.get("iterations", 50)
+        iterations = input_data.get("iterations", 30)
         target_similarity = input_data.get("target_similarity", 0.35)
 
         if not video_b64 and not video_url:
@@ -114,6 +114,15 @@ def handler(job):
                 x2 = min(w, box[2] + 20)
                 y2 = min(h, box[3] + 20)
                 rh, rw = y2 - y1, x2 - x1
+
+                # Optimize every 5 frames (reuse perturbation for nearby frames)
+                if fi % 5 != 0 and last_noise is not None:
+                    n = last_noise
+                    if n.shape[0] != rh or n.shape[1] != rw:
+                        n = cv2.resize(n, (rw, rh))
+                    frame[y1:y2, x1:x2] = np.clip(frame[y1:y2, x1:x2].astype(np.float32) + n, 0, 255).astype(np.uint8)
+                    writer.write(frame)
+                    continue
 
                 # Optimize THIS frame at full resolution with texture-aware masking
                 # Use CPU float64 for optimization (GPU float32 loses precision)
