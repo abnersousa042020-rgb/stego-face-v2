@@ -93,11 +93,11 @@ def handler(job):
             cap.release(); os.unlink(video_path)
             return {"error": "No face detected"}
 
-        # Process
-        print(f"[{time.time()-t0:.1f}s] Processing (GPU, every 2 frames, {iterations} iters)...")
+        # Process — write raw frames to pipe (single H.264 encode, no double compression)
+        print(f"[{time.time()-t0:.1f}s] Processing (every 2 frames, {iterations} iters)...")
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        temp_out = video_path + '_out.mp4'
-        writer = cv2.VideoWriter(temp_out, cv2.VideoWriter.fourcc(*'mp4v'), fps, (w, h))
+        temp_raw = video_path + '_raw.yuv'
+        raw_file = open(temp_raw, 'wb')
 
         sims = []
         cached_noise = None
@@ -158,26 +158,28 @@ def handler(job):
                 n = cached_noise if cached_noise.shape[0] == brh and cached_noise.shape[1] == brw else cv2.resize(cached_noise, (brw, brh))
                 frame[by1:by2, bx1:bx2] = np.clip(frame[by1:by2, bx1:bx2].astype(np.float32) + n, 0, 255).astype(np.uint8)
 
-            writer.write(frame)
+            raw_file.write(cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420).tobytes())
             if (fi+1) % 500 == 0:
                 avg = np.mean(sims) if sims else 1.0
                 print(f"  [{time.time()-t0:.1f}s] Frame {fi+1}/{total_frames} avg_sim={avg:.4f}")
 
         cap.release()
-        writer.release()
+        raw_file.close()
         avg_sim = float(np.mean(sims)) if sims else 1.0
         print(f"[{time.time()-t0:.1f}s] Done. Avg sim: {avg_sim:.4f}")
 
-        # Re-encode
+        # Single H.264 encode from raw YUV (no double compression from mp4v→h264)
         final_out = video_path + '_final.mp4'
         probe = subprocess.run(['ffprobe', '-v', 'quiet', '-select_streams', 'a', '-show_entries', 'stream=codec_type', video_path], capture_output=True, text=True)
         has_audio = 'audio' in probe.stdout
         if has_audio:
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-i', video_path, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-map', '0:v:0', '-map', '1:a:0', '-map_metadata', '-1', '-shortest', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s', f'{w}x{h}', '-r', str(int(fps)), '-i', temp_raw, '-i', video_path, '-c:v', 'libx264', '-crf', '16', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-map', '0:v:0', '-map', '1:a:0', '-map_metadata', '-1', '-shortest', final_out], capture_output=True)
         else:
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-map_metadata', '-1', '-an', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s', f'{w}x{h}', '-r', str(int(fps)), '-i', temp_raw, '-c:v', 'libx264', '-crf', '16', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-map_metadata', '-1', '-an', final_out], capture_output=True)
         if not os.path.exists(final_out):
-            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '18', '-map_metadata', '-1', '-an', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s', f'{w}x{h}', '-r', str(int(fps)), '-i', temp_raw, '-c:v', 'libx264', '-crf', '16', '-map_metadata', '-1', '-an', final_out], capture_output=True)
+        try: os.unlink(temp_raw)
+        except: pass
 
         # Upload result
         file_size_mb = os.path.getsize(final_out) / 1024 / 1024
@@ -202,7 +204,7 @@ def handler(job):
             with open(final_out, 'rb') as f:
                 result_b64 = base64.b64encode(f.read()).decode()
 
-        for p in [video_path, temp_out, final_out]:
+        for p in [video_path, final_out]:
             try: os.unlink(p)
             except: pass
 
