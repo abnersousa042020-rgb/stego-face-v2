@@ -93,11 +93,11 @@ def handler(job):
             cap.release(); os.unlink(video_path)
             return {"error": "No face detected"}
 
-        # Process — write raw frames to pipe (single H.264 encode, no double compression)
+        # Process
         print(f"[{time.time()-t0:.1f}s] Processing (every 2 frames, {iterations} iters)...")
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        temp_raw = video_path + '_raw.yuv'
-        raw_file = open(temp_raw, 'wb')
+        temp_out = video_path + '_out.mp4'
+        writer = cv2.VideoWriter(temp_out, cv2.VideoWriter.fourcc(*'mp4v'), fps, (w, h))
 
         sims = []
         cached_noise = None
@@ -158,27 +158,27 @@ def handler(job):
                 n = cached_noise if cached_noise.shape[0] == brh and cached_noise.shape[1] == brw else cv2.resize(cached_noise, (brw, brh))
                 frame[by1:by2, bx1:bx2] = np.clip(frame[by1:by2, bx1:bx2].astype(np.float32) + n, 0, 255).astype(np.uint8)
 
-            raw_file.write(cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420).tobytes())
+            writer.write(frame)
             if (fi+1) % 500 == 0:
                 avg = np.mean(sims) if sims else 1.0
                 print(f"  [{time.time()-t0:.1f}s] Frame {fi+1}/{total_frames} avg_sim={avg:.4f}")
 
         cap.release()
-        raw_file.close()
+        writer.release()
         avg_sim = float(np.mean(sims)) if sims else 1.0
         print(f"[{time.time()-t0:.1f}s] Done. Avg sim: {avg_sim:.4f}")
 
-        # Single H.264 encode from raw YUV (no double compression from mp4v→h264)
+        # Re-encode with H.264 + original audio
         final_out = video_path + '_final.mp4'
         probe = subprocess.run(['ffprobe', '-v', 'quiet', '-select_streams', 'a', '-show_entries', 'stream=codec_type', video_path], capture_output=True, text=True)
         has_audio = 'audio' in probe.stdout
         if has_audio:
-            subprocess.run(['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s', f'{w}x{h}', '-r', str(int(fps)), '-i', temp_raw, '-i', video_path, '-c:v', 'libx264', '-crf', '16', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-map', '0:v:0', '-map', '1:a:0', '-map_metadata', '-1', '-shortest', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-i', video_path, '-c:v', 'libx264', '-crf', '16', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-map', '0:v:0', '-map', '1:a:0', '-map_metadata', '-1', '-shortest', final_out], capture_output=True)
         else:
-            subprocess.run(['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s', f'{w}x{h}', '-r', str(int(fps)), '-i', temp_raw, '-c:v', 'libx264', '-crf', '16', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-map_metadata', '-1', '-an', final_out], capture_output=True)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '16', '-preset', 'fast', '-pix_fmt', 'yuv420p', '-map_metadata', '-1', '-an', final_out], capture_output=True)
         if not os.path.exists(final_out):
-            subprocess.run(['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-s', f'{w}x{h}', '-r', str(int(fps)), '-i', temp_raw, '-c:v', 'libx264', '-crf', '16', '-map_metadata', '-1', '-an', final_out], capture_output=True)
-        try: os.unlink(temp_raw)
+            subprocess.run(['ffmpeg', '-y', '-i', temp_out, '-c:v', 'libx264', '-crf', '16', '-map_metadata', '-1', '-an', final_out], capture_output=True)
+        try: os.unlink(temp_out)
         except: pass
 
         # Upload result
